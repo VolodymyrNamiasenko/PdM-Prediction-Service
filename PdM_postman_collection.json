@@ -1,0 +1,138 @@
+{
+  "info": {
+    "_postman_id": "b9c28b2a-6e3a-4c5f-8c94-6d2f9c9f3e9a",
+    "name": "PdM Prediction Service",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000"
+    },
+    {
+      "key": "username",
+      "value": "admin"
+    },
+    {
+      "key": "password",
+      "value": "admin123"
+    },
+    {
+      "key": "token",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth - Get Token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          }
+        ],
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "username",
+              "value": "{{username}}"
+            },
+            {
+              "key": "password",
+              "value": "{{password}}"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{baseUrl}}/token",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "token"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json && json.access_token) {",
+              "  pm.collectionVariables.set('token', json.access_token);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Predict - Stub Model",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"machine_id\": \"CAB-INS02\",\n  \"timestamp\": \"2026-03-20T10:00:00Z\",\n  \"features\": {\n    \"pvc_screw_pressure_bar\": 145.2,\n    \"color_screw_pressure_bar\": 132.8,\n    \"nylon_screw_pressure_bar\": 128.4,\n    \"pvc_screw_speed_rpm\": 310,\n    \"color_screw_speed_rpm\": 295,\n    \"nylon_screw_speed_rpm\": 280,\n    \"motor_load_amps\": 12.4,\n    \"motor_load_percent\": 68.5,\n    \"line_speed_m_min\": 42.7,\n    \"payoff_tension_n\": 220,\n    \"takeup_tension_n\": 215,\n    \"post_extrusion_diameter_mm\": 8.2,\n    \"machine_status\": 1\n  }\n}\n"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/predict",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "predict"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Predict - Batch (Stub Model)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "[\n  {\n    \"machine_id\": \"CAB-INS02\",\n    \"timestamp\": \"2026-03-20T10:00:00Z\",\n    \"features\": {\n      \"pvc_screw_pressure_bar\": 145.2,\n      \"color_screw_pressure_bar\": 132.8,\n      \"nylon_screw_pressure_bar\": 128.4,\n      \"pvc_screw_speed_rpm\": 310,\n      \"color_screw_speed_rpm\": 295,\n      \"nylon_screw_speed_rpm\": 280,\n      \"motor_load_amps\": 12.4,\n      \"motor_load_percent\": 68.5,\n      \"line_speed_m_min\": 42.7,\n      \"payoff_tension_n\": 220,\n      \"takeup_tension_n\": 215,\n      \"post_extrusion_diameter_mm\": 8.2,\n      \"machine_status\": 1\n    }\n  },\n  {\n    \"machine_id\": \"CAB-INS02\",\n    \"timestamp\": \"2026-03-20T10:00:10Z\",\n    \"features\": {\n      \"pvc_screw_pressure_bar\": 146.0,\n      \"color_screw_pressure_bar\": 133.1,\n      \"nylon_screw_pressure_bar\": 129.0,\n      \"pvc_screw_speed_rpm\": 311,\n      \"color_screw_speed_rpm\": 296,\n      \"nylon_screw_speed_rpm\": 281,\n      \"motor_load_amps\": 12.5,\n      \"motor_load_percent\": 69.0,\n      \"line_speed_m_min\": 42.8,\n      \"payoff_tension_n\": 221,\n      \"takeup_tension_n\": 216,\n      \"post_extrusion_diameter_mm\": 8.21,\n      \"machine_status\": 1\n    }\n  }\n]\n"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/predict/batch",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "predict",
+            "batch"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+.DS_Store
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+~$*.docx
+
+# Python envs
+.venv/
+pdm_env/
+
+# Node / Vite
+node_modules/
+**/node_modules/
+dist/
+
+# Local runtime files
+run
+
+# Large/generated datasets (keep source + scripts instead)
+training data/

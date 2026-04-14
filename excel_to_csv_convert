@@ -1,0 +1,32 @@
+"""
+Convert large IIoT sensor XLSX files to compressed CSV (.csv.gz)
+Usage: python convert_xlsx_to_csv_gz.py input.xlsx output.csv.gz
+"""
+import sys
+import pandas as pd
+import os
+
+def convert(input_path, output_path=None):
+    if output_path is None:
+        output_path = os.path.splitext(input_path)[0] + '.csv.gz'
+
+    print(f"Reading {input_path}...")
+    df = pd.read_excel(input_path, header=None)
+
+    print(f"  Rows: {len(df)}, Columns: {len(df.columns)}")
+
+    print(f"Writing {output_path}...")
+    df.to_csv(output_path, index=False, header=False, compression='gzip')
+
+    in_size = os.path.getsize(input_path)
+    out_size = os.path.getsize(output_path)
+    ratio = (1 - out_size / in_size) * 100
+
+    print(f"  {in_size/1024/1024:.1f} MB -> {out_size/1024/1024:.1f} MB ({ratio:.0f}% smaller)")
+    print("Done!")
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python convert_xlsx_to_csv_gz.py input.xlsx [output.csv.gz]")
+        sys.exit(1)
+    convert(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
