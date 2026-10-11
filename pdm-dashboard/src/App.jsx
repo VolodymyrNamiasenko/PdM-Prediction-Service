@@ -4,8 +4,8 @@ import './App.css'
 
 function App() {
   const [baseUrl, setBaseUrl] = useState('http://127.0.0.1:8000')
-  const [username, setUsername] = useState('admin')
-  const [password, setPassword] = useState('admin123')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [token, setToken] = useState('')
   const [tokenStatus, setTokenStatus] = useState('Not connected')
   const [machineId, setMachineId] = useState('CAB-INS02')
