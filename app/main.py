@@ -1,13 +1,18 @@
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from xgboost import XGBClassifier
 import xgboost as xgb
 import pandas as pd
 from pathlib import Path
 from math import exp
+from functools import wraps
+from threading import RLock
+from datetime import timezone
+import numpy as np
 import os
+import secrets
 from datetime import datetime
 from pipeline import add_temporal_features, RAW_FEATURES
 
@@ -22,12 +27,9 @@ app.add_middleware(
 )
 
 # ---- Model loading (XGBoost) ----
-MODEL_PATH = Path(
-    "/Users/volodymyrnamiasenko/Machines_connectivity/models/xgb_cab_ins02_v2.json"
-)
-FEATURE_COLUMNS_PATH = Path(
-    "/Users/volodymyrnamiasenko/Machines_connectivity/models/feature_columns_v2.json"
-)
+BASE_DIR = Path(__file__).resolve().parents[1]
+MODEL_PATH = Path(os.getenv("MODEL_PATH", str(BASE_DIR / "models/xgb_cab_ins02_v2.json")))
+FEATURE_COLUMNS_PATH = Path(os.getenv("FEATURE_COLUMNS_PATH", str(BASE_DIR / "models/feature_columns_v2.json")))
 
 _model = XGBClassifier()
 if MODEL_PATH.exists():
@@ -52,6 +54,25 @@ _saturation_state: dict[str, dict] = {}
 _history: dict[str, list[dict]] = {}
 _dq_state: dict[str, dict] = {}
 TEMP_SCALING = float(os.getenv("TEMP_SCALING", "2.0"))
+if not np.isfinite(TEMP_SCALING) or TEMP_SCALING <= 0:
+    raise ValueError("TEMP_SCALING must be finite and positive")
+_state_lock = RLock()
+
+
+def synchronized(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        with _state_lock:
+            return function(*args, **kwargs)
+    return wrapper
+
+
+def _calibrate(margin: float) -> float:
+    scaled = margin / TEMP_SCALING
+    if scaled >= 0:
+        return 1 / (1 + exp(-scaled))
+    value = exp(scaled)
+    return value / (1 + value)
 
 RANGE_LIMITS = {
     "pvc_screw_pressure_bar": (0.0, 300.0),
@@ -75,15 +96,29 @@ CRITICAL_FIELDS = {
 
 # Minimal OAuth2 password flow (dev-only)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-DEV_USERNAME = "admin"
-DEV_PASSWORD = "admin123"
-DEV_TOKEN = "devtoken"
+DEV_USERNAME = os.getenv("PDM_USERNAME", "")
+DEV_PASSWORD = os.getenv("PDM_PASSWORD", "")
+DEV_TOKEN = os.getenv("PDM_TOKEN", "")
+
+
+def _require_auth_configuration():
+    if not all((DEV_USERNAME, DEV_PASSWORD, DEV_TOKEN)):
+        raise HTTPException(status_code=503, detail="Authentication is not configured")
 
 
 class PredictionRequest(BaseModel):
-    machine_id: str = Field(..., examples=["CAB-INS02"])
+    model_config = ConfigDict(allow_inf_nan=False)
+    machine_id: str = Field(..., min_length=1, max_length=128, examples=["CAB-INS02"])
     timestamp: str = Field(..., examples=["2026-03-20T10:00:00Z"])
     features: dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("timestamp")
+    @classmethod
+    def valid_timestamp(cls, value):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("Timestamp must include a timezone")
+        return parsed.astimezone(timezone.utc).isoformat()
 
 
 class PredictionResponse(BaseModel):
@@ -105,12 +140,13 @@ class PredictionResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok" if _model is not None and FEATURE_COLUMNS else "not_ready", "model_loaded": _model is not None}
 
 
 @app.post("/token")
 def token(form_data: OAuth2PasswordRequestForm = Depends()):
-    if form_data.username != DEV_USERNAME or form_data.password != DEV_PASSWORD:
+    _require_auth_configuration()
+    if not secrets.compare_digest(form_data.username.encode(), DEV_USERNAME.encode()) or not secrets.compare_digest(form_data.password.encode(), DEV_PASSWORD.encode()):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -120,7 +156,8 @@ def token(form_data: OAuth2PasswordRequestForm = Depends()):
 
 
 def require_token(token: str = Depends(oauth2_scheme)):
-    if token != DEV_TOKEN:
+    _require_auth_configuration()
+    if not secrets.compare_digest(token.encode(), DEV_TOKEN.encode()):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
@@ -152,8 +189,11 @@ def _sanitize_features(
     status = "OK"
 
     ts = _parse_ts(timestamp)
-    if state["last_ts"] and ts and ts == state["last_ts"]:
-        return None, {"status": "HardFail", "flags": ["duplicate_timestamp"]}, True
+    if ts is None:
+        return None, {"status": "HardFail", "flags": ["invalid_timestamp"]}, True
+    if state["last_ts"] and ts <= state["last_ts"]:
+        flag = "duplicate_timestamp" if ts == state["last_ts"] else "out_of_order_timestamp"
+        return None, {"status": "HardFail", "flags": [flag]}, True
 
     if state["last_ts"] and ts:
         gap = (ts - state["last_ts"]).total_seconds()
@@ -161,6 +201,10 @@ def _sanitize_features(
             flags.append(f"timestamp_gap:{int(gap)}s")
         if gap > 60:
             flags.append("gap_over_60s")
+        if gap > EMA_RESET_GAP_SEC:
+            _reset_machine_state(machine_id)
+            state = {"last_good": {}, "history": [], "last_ts": None, "stale_counts": {}}
+            flags.append("history_reset")
 
     sanitized: dict[str, float] = {}
     invalid_fields: set[str] = set()
@@ -174,14 +218,7 @@ def _sanitize_features(
         return None
 
     def _forward_fill_from_batch(key: str) -> float | None:
-        if lookahead is None or lookahead_index is None:
-            return None
-        for i in range(1, 4):
-            idx = lookahead_index + i
-            if idx < len(lookahead):
-                val = lookahead[idx].get(key)
-                if val is not None:
-                    return float(val)
+        # Future readings are unavailable online; never leak them into replay.
         return None
 
     for key in RAW_FEATURES:
@@ -255,7 +292,7 @@ def _sanitize_features(
 
     invalid_ratio = len(invalid_fields) / max(len(RAW_FEATURES), 1)
     critical_missing = any(k in invalid_fields for k in CRITICAL_FIELDS)
-    if invalid_ratio > 0.30 or critical_missing:
+    if invalid_fields:
         return None, {"status": "HardFail", "flags": flags + ["hard_fail"]}, True
 
     if flags:
@@ -295,7 +332,8 @@ def _build_feature_vector(machine_id: str, timestamp: str, features: dict[str, f
     df = df.sort_values("timestamp").reset_index(drop=True)
     enriched = add_temporal_features(df)
     latest = enriched.iloc[-1]
-    X = pd.DataFrame([latest[FEATURE_COLUMNS].values], columns=FEATURE_COLUMNS)
+    values = np.nan_to_num(latest[FEATURE_COLUMNS].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    X = pd.DataFrame([values], columns=FEATURE_COLUMNS)
     return X
 
 
@@ -320,7 +358,8 @@ def _xgb_margin(machine_id: str, timestamp: str, features: dict[str, float]) -> 
 
 def _parse_ts(ts: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        value = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return value.astimezone(timezone.utc) if value.tzinfo else None
     except Exception:
         return None
 
@@ -407,7 +446,8 @@ def _physics_sanity(
     )
 
     if pressures_improved and load_improved and speeds_improved:
-        return min(calibrated, prev_c)
+        calibrated = min(calibrated, prev_c)
+        _physics_state[machine_id]["calibrated"] = calibrated
 
     return calibrated
 
@@ -522,6 +562,7 @@ def _roc_alerts(machine_id: str, features: dict[str, float]) -> list[dict]:
 
 
 @app.post("/api/v1/predict", response_model=PredictionResponse)
+@synchronized
 def predict(req: PredictionRequest, _token: str = Depends(require_token)):
     sanitized, dq_meta, hard_fail = _sanitize_features(
         req.machine_id, req.timestamp, req.features
@@ -550,14 +591,14 @@ def predict(req: PredictionRequest, _token: str = Depends(require_token)):
             detail="Warmup required: need at least 60 records (10 minutes) before inference.",
         )
     smoothed_margin = _ema(req.machine_id, raw_margin, req.timestamp)
-    calibrated = 1 / (1 + exp(-smoothed_margin / TEMP_SCALING))
+    calibrated = _calibrate(smoothed_margin)
 
+    roc_alerts = _roc_alerts(req.machine_id, sanitized)
     calibrated = _physics_sanity(req.machine_id, sanitized, calibrated)
 
     severity_index = _severity_index(
         req.machine_id, sanitized, calibrated, raw_margin
     )
-    roc_alerts = _roc_alerts(req.machine_id, sanitized)
 
     if calibrated <= 0.3:
         risk_level = "Healthy"
@@ -601,6 +642,7 @@ def _stub_infer(features: dict[str, float]) -> tuple[float, str]:
 
 
 @app.post("/api/v1/predict/batch", response_model=list[PredictionResponse])
+@synchronized
 def predict_batch(
     items: list[PredictionRequest],
     reset_history: bool = Query(False, description="Reset per-machine state before processing"),
@@ -667,14 +709,14 @@ def predict_batch(
             )
             continue
         smoothed_margin = _ema(req.machine_id, raw_margin, req.timestamp)
-        calibrated = 1 / (1 + exp(-smoothed_margin / TEMP_SCALING))
+        calibrated = _calibrate(smoothed_margin)
 
+        roc_alerts = _roc_alerts(req.machine_id, sanitized)
         calibrated = _physics_sanity(req.machine_id, sanitized, calibrated)
 
         severity_index = _severity_index(
             req.machine_id, sanitized, calibrated, raw_margin
         )
-        roc_alerts = _roc_alerts(req.machine_id, sanitized)
 
         if calibrated <= 0.3:
             risk_level = "Healthy"

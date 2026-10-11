@@ -16,6 +16,8 @@ import json
 import glob
 import numpy as np
 import pandas as pd
+from pathlib import Path
+import os
 from collections import OrderedDict
 
 # ============================================================
@@ -41,9 +43,12 @@ RAW_FEATURES = [
 # 2. LOAD AND PARSE ALL BREAKDOWN FILES
 # ============================================================
 
-def load_breakdown_files(pattern='/mnt/user-data/uploads/breakdown_*.json'):
+def load_breakdown_files(pattern=None):
     """Load all breakdown event files into a list of DataFrames."""
+    pattern = pattern or str(Path(__file__).resolve().parent / 'ref_data_set' / 'breakdown_*.json')
     files = sorted(glob.glob(pattern))
+    if not files:
+        raise ValueError(f'No breakdown files found: {pattern}')
     all_events = []
     
     for fp in files:
@@ -57,7 +62,8 @@ def load_breakdown_files(pattern='/mnt/user-data/uploads/breakdown_*.json'):
             rows.append(row)
         
         df = pd.DataFrame(rows)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='raise')
+        df = df.sort_values('timestamp').reset_index(drop=True)
         df['event_file'] = fp.split('/')[-1]
         
         # Label: 1 if maintenance_required == 1 (pre-failure phase)
@@ -167,6 +173,8 @@ def build_training_data(events, min_lookback=60):
     
     Returns X (features), y (labels), and metadata.
     """
+    if not events:
+        raise ValueError('At least one event is required')
     processed = []
     
     for df in events:
@@ -176,6 +184,8 @@ def build_training_data(events, min_lookback=60):
         processed.append(enriched)
     
     combined = pd.concat(processed, ignore_index=True)
+    if combined.empty:
+        raise ValueError('No samples remain after warmup')
     
     feature_cols = get_feature_columns(combined)
     
@@ -206,6 +216,8 @@ def train_and_evaluate():
     print("=" * 80)
     
     events = load_breakdown_files()
+    if len(events) < 2:
+        raise ValueError('Leave-one-event-out evaluation needs at least two events')
     print(f"Loaded {len(events)} breakdown event files")
     
     # ---- Leave-one-event-out cross-validation ----
@@ -319,9 +331,11 @@ def train_and_evaluate():
     print(f"\n  Top 30 breakdown: {temporal_count} temporal features, {raw_count} raw features")
     
     # ---- Save model and feature list ----
-    final_model.save_model('/home/claude/xgb_cab_ins02_v2.json')
+    output_dir = Path(os.getenv('PDM_OUTPUT_DIR', str(Path(__file__).resolve().parent / 'models')))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final_model.save_model(output_dir / 'xgb_cab_ins02_v2.json')
     
-    with open('/home/claude/feature_columns.json', 'w') as f:
+    with (output_dir / 'feature_columns_v2.json').open('w') as f:
         json.dump(feat_cols, f, indent=2)
     
     print(f"\nModel saved: xgb_cab_ins02_v2.json")
